@@ -3012,9 +3012,13 @@ async def cancel_order_by_id(order_id: str) -> str:
     _ensure_clients()
     try:
         # Cancel the specific order
+        # Alpaca returns HTTP 204 No Content on success → response is None
         response = trade_client.cancel_order_by_id(order_id)
-        
-        # Format the response
+
+        if response is None:
+            # HTTP 204 — cancel accepted successfully
+            return f"Order {order_id} cancelled successfully."
+
         status = "Success" if response.status == 200 else "Failed"
         result = f"""
         Order Cancellation Result:
@@ -3022,12 +3026,10 @@ async def cancel_order_by_id(order_id: str) -> str:
         Order ID: {response.id}
         Status: {status}
         """
-        
         if response.body:
             result += f"Details: {response.body}\n"
-            
         return result
-        
+
     except Exception as e:
         return f"Error cancelling order {order_id}: {str(e)}"
 
