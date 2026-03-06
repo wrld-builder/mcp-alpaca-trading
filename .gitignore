@@ -1,0 +1,18 @@
+# Trading data (personal, не коммитить)
+daily_log_*.json
+playbook_memory.json
+sector_map_*.json
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# OS
+.DS_Store
