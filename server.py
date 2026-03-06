@@ -33,6 +33,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.historical.corporate_actions import CorporateActionsClient
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+from alpaca.data.historical.news import NewsClient
 from alpaca.data.live.stock import StockDataStream
 from alpaca.data.requests import (
     OptionLatestQuoteRequest,
@@ -54,7 +55,8 @@ from alpaca.data.requests import (
     CryptoLatestBarRequest,
     CryptoLatestTradeRequest,
     CryptoSnapshotRequest,
-    CryptoLatestOrderbookRequest
+    CryptoLatestOrderbookRequest,
+    NewsRequest
 )
 
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -195,6 +197,7 @@ stock_data_stream_client = None
 option_historical_data_client = None
 corporate_actions_client = None
 crypto_historical_data_client = None
+news_client = None
 
 def _ensure_clients():
     """
@@ -202,8 +205,8 @@ def _ensure_clients():
     Uses API key/secret pair from environment variables.
     """
     global _clients_initialized, trade_client, stock_historical_data_client, stock_data_stream_client
-    global option_historical_data_client, corporate_actions_client, crypto_historical_data_client
-    
+    global option_historical_data_client, corporate_actions_client, crypto_historical_data_client, news_client
+
     if not _clients_initialized:
         trade_client = TradingClientSigned(TRADE_API_KEY, TRADE_API_SECRET, paper=ALPACA_PAPER_TRADE_BOOL)
         stock_historical_data_client = StockHistoricalDataClientSigned(TRADE_API_KEY, TRADE_API_SECRET)
@@ -211,6 +214,7 @@ def _ensure_clients():
         option_historical_data_client = OptionHistoricalDataClientSigned(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
         corporate_actions_client = CorporateActionsClientSigned(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
         crypto_historical_data_client = CryptoHistoricalDataClientSigned(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
+        news_client = NewsClient(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
         _clients_initialized = True
 
 # ============================================================================
@@ -3133,6 +3137,81 @@ async def exercise_options_position(symbol_or_contract_id: str) -> str:
         return f"Successfully submitted exercise request for option contract: {symbol_or_contract_id}"
     except Exception as e:
         return f"Error exercising option contract '{symbol_or_contract_id}': {str(e)}"
+
+
+# ============================================================================
+# News Tools
+# ============================================================================
+
+@mcp.tool()
+async def get_news(
+    symbols: Optional[str] = None,
+    limit: int = 10,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    include_content: bool = False,
+) -> str:
+    """
+    Retrieves recent news articles from Alpaca (Benzinga source).
+
+    Args:
+        symbols (Optional[str]): Comma-separated ticker symbols to filter news (e.g. 'AAPL,MSFT').
+                                 If None, returns general market news.
+        limit (int): Maximum number of articles to return (default: 10, max: 50).
+        start (Optional[str]): Start datetime in ISO format (e.g. '2024-01-01T00:00:00Z').
+        end (Optional[str]): End datetime in ISO format.
+        include_content (bool): Whether to include full article content (default: False).
+
+    Returns:
+        str: Formatted list of news articles with headline, summary, symbols, source, and URL.
+    """
+    _ensure_clients()
+    try:
+        limit = min(max(1, limit), 50)
+        kwargs = {"limit": limit}
+        if symbols:
+            kwargs["symbols"] = symbols
+        if start:
+            kwargs["start"] = start
+        if end:
+            kwargs["end"] = end
+
+        req = NewsRequest(**kwargs)
+        result = news_client.get_news(req)
+
+        # NewsSet.data is a dict; flatten all articles into a single list
+        all_articles = []
+        for articles in result.data.values():
+            all_articles.extend(articles)
+
+        # Sort by created_at descending and deduplicate by id
+        seen_ids = set()
+        unique_articles = []
+        for a in sorted(all_articles, key=lambda x: x.created_at, reverse=True):
+            if a.id not in seen_ids:
+                seen_ids.add(a.id)
+                unique_articles.append(a)
+
+        if not unique_articles:
+            return "No news articles found for the given parameters."
+
+        lines = [f"News Articles ({len(unique_articles)} found):", "=" * 60]
+        for i, article in enumerate(unique_articles[:limit], 1):
+            lines.append(f"\n[{i}] {article.headline}")
+            lines.append(f"    Source:   {article.source} | {article.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            lines.append(f"    Symbols:  {', '.join(article.symbols) if article.symbols else 'N/A'}")
+            if article.summary:
+                lines.append(f"    Summary:  {article.summary[:300]}")
+            if include_content and article.content:
+                import re as _re
+                clean = _re.sub(r'<[^>]+>', '', article.content)[:500]
+                lines.append(f"    Content:  {clean}")
+            lines.append(f"    URL:      {article.url}")
+            lines.append("    " + "-" * 56)
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error fetching news: {str(e)}"
 
 
 # ============================================================================
