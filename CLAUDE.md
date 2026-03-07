@@ -91,12 +91,18 @@ qty             = floor(target_notional / entry_price)
 
 | Quality | Условие | Эффект на A / B / D |
 |---|---|---|
-| HIGH | Проверены 3 класса источников (issuer/filings + Alpaca news + external) и нет ошибок, даже если items = 0-2 | Нормальный режим |
+| HIGH | Проверены все 3 класса источников без ошибок | Нормальный режим |
 | MEDIUM | Проверены 2 класса источников, ошибок нет | Снижать confidence |
 | LOW | 1 класс источников / ошибки / всё упало | Предпочитать NO_TRADE / HOLD; STRONG только при исключительно ясном фундаментальном тезисе |
 
-Источники (3 класса): Alpaca News (Benzinga) + EDGAR/IR (issuer filings) + внешний фид.
-Критерий качества - покрытие классов источников, а не количество найденных items (на спокойных днях у конкретного эмитента items = 0-2 - это нормально).
+**Источники (3 класса):**
+- **Класс 1 — Alpaca News (Benzinga)**: `get_news` MCP, окно 7 дней, limit=50, по всем позициям + top-candidates
+- **Класс 2 — WebSearch**: для каждого тикера портфеля и top-20 кандидатов — `WebSearch("[TICKER] news contract earnings analyst upgrade 2026")` + `WebSearch("[TICKER] analyst price target site:finance.yahoo.com OR site:finviz.com")`
+- **Класс 3 — Yahoo Finance / Finviz**: `WebFetch("https://finviz.com/quote.ashx?t=[TICKER]")` или `WebFetch("https://finance.yahoo.com/quote/[TICKER]/analysis/")` — аналитические таргеты, консенсус, число аналитиков
+
+Критерий качества — покрытие классов источников, а не количество items. На спокойных днях 0-2 items по эмитенту — норма.
+Если WebSearch/WebFetch вернул ошибку или пустой результат — засчитать класс как недоступный (не повышать coverage).
+Если для тикера найдены данные аналитиков (mean target, # analysts) — включить в thesis Prompt A/B как подтверждающий сигнал.
 
 ---
 
@@ -106,18 +112,26 @@ qty             = floor(target_notional / entry_price)
 
 ---
 
-### ШАГ 1 - DataSnapshot через Alpaca MCP
+### ШАГ 1 - DataSnapshot через Alpaca MCP + внешние источники
 
-Запроси через Alpaca MCP:
+**1а — Alpaca MCP данные:**
 - Account: cash, equity, buying_power
 - Positions: ticker, qty, avg_entry_price, current_price, unrealized_pl, unrealized_plpc
 - Open orders
 - Closed orders за последние 60 дней (для cooldowns и rotations_count)
-- News по расширенному списку тикеров:
-  - текущие позиции (портфель)
-  - pipeline_strong (кандидаты из прошлого цикла, если есть)
-  - watchlist_medium
-  - При построении pipeline в Prompt A: быстрый предварительный news-скрининг для top-50 кандидатов по universe-скорингу (чтобы A не ставил STRONG/MEDIUM вслепую без news)
+- **Alpaca News (Класс 1)**: `get_news` для всех позиций + top-20 pipeline кандидатов, окно 7 дней, limit=50. Записать: items_found, ошибки.
+
+Если Alpaca MCP недоступен — СТОП. Сообщи пользователю, не продолжай.
+
+**1б — WebSearch (Класс 2)** — для каждого тикера в портфеле и top-20 кандидатов:
+- `WebSearch("[TICKER] news earnings contract deal analyst 2026 last week")`
+- `WebSearch("[TICKER] analyst price target upgrade downgrade 2026")`
+Записать ключевые находки: контракты, earnings beats/misses, рейтинговые изменения, крупные сделки M&A. Если WebSearch недоступен — отметить Класс 2 как FAIL.
+
+**1в — Yahoo Finance / Finviz (Класс 3)** — для каждого тикера в портфеле и top-20 кандидатов:
+- Finviz: `WebFetch("https://finviz.com/quote.ashx?t=[TICKER]")` → извлечь: Target Price, число аналитиков, рейтинг
+- Или Yahoo: `WebFetch("https://finance.yahoo.com/quote/[TICKER]/analysis/")` → Mean Target, # analysts, High/Low target
+Если WebFetch недоступен или вернул ошибку — отметить Класс 3 как FAIL.
 
 Выведи:
 ```
@@ -126,7 +140,15 @@ Equity:          $XXX,XXX
 Cash:            $XXX,XXX
 Открытых позиций: X / 25
 Открытых ордеров: X
-News coverage:   [HIGH / MEDIUM / LOW] ([N]/3 классов источников, [N] items)
+News coverage:   [HIGH / MEDIUM / LOW] ([N]/3 классов, [N] news items)
+
+Класс 1 (Alpaca/Benzinga): [OK / FAIL] — [N] items за 7 дней
+Класс 2 (WebSearch):       [OK / FAIL] — находки: [краткий список]
+Класс 3 (Yahoo/Finviz):    [OK / FAIL] — analyst consensus для X тикеров
+
+Analyst consensus:
+  [TICKER]: mean target $XXX, [N] analysts, [Buy/Hold/Sell X/Y/Z]
+  ...
 ===
 ```
 
@@ -422,6 +444,13 @@ INPUTS (DataSnapshot, same as_of_et for everything):
   last close, trading status
 - fundamentals (if available)
 - news_digest + news_coverage (sources_checked, items_found, coverage_quality, errors)
+  * Класс 1: Alpaca/Benzinga items (7-day window)
+  * Класс 2: WebSearch findings per ticker (contracts, earnings, upgrades/downgrades)
+  * Класс 3: analyst_consensus per ticker {mean_target, n_analysts, buy/hold/sell counts}
+- web_news_digest: key findings from WebSearch per ticker (contracts signed, M&A, beats/misses)
+- analyst_consensus: {TICKER: {mean_target, high_target, n_analysts, rating_mix}} — use as
+  supporting signal (not as a standalone trigger). Significant divergence between analyst
+  consensus and current price is relevant context for thesis strength.
 - portfolio_state: open_positions (ticker, sector, avg_price, entry_date,
   days_below_entry, was_in_profit), cash/equity, cooldowns, sector_counts,
   rotations_last_30d_count
@@ -490,6 +519,11 @@ INPUTS:
   OHLCV, last close
 - pipeline_context: signal_strength, rank/score, expected_return/risk notes
 - market_regime_context: label, confidence, implications
+- web_news_summary: key WebSearch findings for this ticker (contracts, catalysts, risks)
+- analyst_consensus: {mean_target, high_target, low_target, n_analysts, rating_mix}
+  Use as context: if mean_target >> current_price and n_analysts >= 5, this supports
+  bullish thesis. If mean_target ≈ current_price or below, note as headwind.
+  Do NOT treat analyst consensus as a hard trigger — use as one input among many.
 - portfolio_context:
     is_held, avg_price, qty, entry_date, days_below_entry,
     was_in_profit, peak_price_since_entry (if available)
@@ -746,4 +780,4 @@ sector_map_{YYYY-MM-DD}.json  кэш секторного маппинга на 
 
 ---
 
-*v3.3 - финальное соответствие US/Alpaca MVP-спеку | auto-execution | news по классам источников + universe top-50 | cooldown только STOP_LOSS | rotations только ROTATE_OUT | partial de-risk отключён | stop_cap: held от avg_entry, new от planned_entry | bracket ADJUST: cancel_children -> resubmit + алерт при ошибке | секторная таксономия: единый консистентный GICS-like proxy с кэшем на день | 25 slots x 4% | sector cap 7 | 1 TP bracket + profit floor | LLM-discretionary, no algo thresholds*
+*v3.4 - news coverage 3 классов: Alpaca/Benzinga(7d) + WebSearch(per ticker) + Yahoo Finance/Finviz(analyst consensus) | analyst_consensus в Prompt A+B как supporting signal (не триггер) | web_news_digest: контракты/earnings/upgrades из WebSearch | auto-execution | cooldown только STOP_LOSS | rotations только ROTATE_OUT | partial de-risk отключён | stop_cap: held от avg_entry, new от planned_entry | bracket ADJUST: cancel_children -> resubmit + алерт | GICS-like proxy кэш на день | 25 slots x 4% | sector cap 7 | 1 TP bracket + profit floor | LLM-discretionary, no algo thresholds*
